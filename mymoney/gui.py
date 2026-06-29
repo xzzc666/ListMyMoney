@@ -20,6 +20,7 @@ CATEGORY_OPTIONS = {
 }
 ALL_FILTER_CATEGORIES = "全部分类"
 ALL_FILTER_TAGS = "全部标签"
+FILTER_LOGIC_OPTIONS = ("与", "或", "非与", "非或")
 
 
 def category_label(category: str) -> str:
@@ -456,7 +457,13 @@ class MoneyApp(tk.Tk):
         self.status_var = tk.StringVar(value=f"数据文件：{self.data_path}")
         self.filter_category_var = tk.StringVar(value=ALL_FILTER_CATEGORIES)
         self.filter_tag_var = tk.StringVar(value=ALL_FILTER_TAGS)
+        self.filter_logic_var = tk.StringVar(value="与")
         self.filter_tag_options: dict[str, str | None] = {}
+        self.selected_filter_tag_ids: list[str] = []
+        self.pie_injection_var = tk.StringVar()
+        self.pie_no_sell_var = tk.BooleanVar(value=False)
+        self.pie_status_var = tk.StringVar(value="按当前筛选结果设置目标配比，金额以人民币等价值计算。")
+        self.pie_target_vars: dict[str, tk.StringVar] = {}
         self.sort_column = "updated_at"
         self.sort_reverse = True
 
@@ -530,8 +537,18 @@ class MoneyApp(tk.Tk):
 
         filter_bar = ttk.Frame(root, padding=(0, 0, 0, 10), style="App.TFrame")
         filter_bar.grid(row=2, column=0, columnspan=2, sticky="ew")
-        filter_bar.columnconfigure(5, weight=1)
+        filter_bar.columnconfigure(6, weight=1)
         ttk.Label(filter_bar, text="按标签显示").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(filter_bar, text="逻辑").grid(row=0, column=1, sticky="w", padx=(0, 6))
+        logic_filter = ttk.Combobox(
+            filter_bar,
+            textvariable=self.filter_logic_var,
+            values=list(FILTER_LOGIC_OPTIONS),
+            state="readonly",
+            width=8,
+        )
+        logic_filter.grid(row=0, column=2, sticky="w", padx=(0, 8))
+        logic_filter.bind("<<ComboboxSelected>>", self._apply_asset_filter)
         category_filter = ttk.Combobox(
             filter_bar,
             textvariable=self.filter_category_var,
@@ -539,7 +556,7 @@ class MoneyApp(tk.Tk):
             state="readonly",
             width=14,
         )
-        category_filter.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        category_filter.grid(row=0, column=3, sticky="w", padx=(0, 8))
         category_filter.bind("<<ComboboxSelected>>", self._on_filter_category_changed)
         self.filter_tag_combo = ttk.Combobox(
             filter_bar,
@@ -548,9 +565,19 @@ class MoneyApp(tk.Tk):
             state="readonly",
             width=28,
         )
-        self.filter_tag_combo.grid(row=0, column=2, sticky="w", padx=(0, 8))
-        self.filter_tag_combo.bind("<<ComboboxSelected>>", self._apply_asset_filter)
-        ttk.Button(filter_bar, text="清空限定", command=self.clear_asset_filter).grid(row=0, column=3, sticky="w")
+        self.filter_tag_combo.grid(row=0, column=4, sticky="w", padx=(0, 8))
+        ttk.Button(filter_bar, text="加入条件", command=self.add_filter_tag).grid(row=0, column=5, sticky="w", padx=(0, 8))
+        ttk.Button(filter_bar, text="移除条件", command=self.remove_selected_filter_tag).grid(row=0, column=6, sticky="w", padx=(0, 8))
+        ttk.Button(filter_bar, text="清空限定", command=self.clear_asset_filter).grid(row=0, column=7, sticky="w")
+        self.filter_tag_list = tk.Listbox(
+            filter_bar,
+            height=2,
+            activestyle="none",
+            exportselection=False,
+            selectmode=tk.EXTENDED,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.filter_tag_list.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(8, 0))
 
         self.asset_tree = ttk.Treeview(
             root,
@@ -578,9 +605,11 @@ class MoneyApp(tk.Tk):
 
         history_frame = ttk.Frame(right, padding=8)
         tag_frame = ttk.Frame(right, padding=8)
+        pie_frame = ttk.Frame(right, padding=8)
         deprecated_frame = ttk.Frame(right, padding=8)
         right.add(history_frame, text="变动流水")
         right.add(tag_frame, text="标签")
+        right.add(pie_frame, text="补pie")
         right.add(deprecated_frame, text="已废除")
 
         history_frame.rowconfigure(1, weight=1)
@@ -617,6 +646,51 @@ class MoneyApp(tk.Tk):
         self.tag_tree.column("name", width=220)
         self.tag_tree.grid(row=1, column=0, sticky="nsew")
 
+        pie_frame.rowconfigure(2, weight=1)
+        pie_frame.rowconfigure(4, weight=1)
+        pie_frame.columnconfigure(0, weight=1)
+        pie_controls = ttk.Frame(pie_frame)
+        pie_controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        pie_controls.columnconfigure(5, weight=1)
+        ttk.Label(pie_controls, text="新注资金额(CNY)").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(pie_controls, textvariable=self.pie_injection_var, width=16).grid(row=0, column=1, sticky="w", padx=(0, 8))
+        ttk.Button(pie_controls, text="当前配比", command=self.fill_pie_targets_current).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(pie_controls, text="平均目标", command=self.fill_pie_targets_equal).grid(row=0, column=3, padx=(0, 8))
+        ttk.Button(pie_controls, text="计算分配", style="Accent.TButton", command=self.calculate_pie_top_up).grid(row=0, column=4)
+        ttk.Checkbutton(pie_controls, text="非卖出再分配", variable=self.pie_no_sell_var).grid(
+            row=1, column=0, columnspan=5, sticky="w", pady=(8, 0)
+        )
+        ttk.Label(pie_frame, textvariable=self.pie_status_var, foreground="#64748b").grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        self.pie_target_canvas = tk.Canvas(pie_frame, height=150, bg="#ffffff", highlightthickness=0)
+        self.pie_target_canvas.grid(row=2, column=0, sticky="nsew")
+        pie_target_scroll = ttk.Scrollbar(pie_frame, orient="vertical", command=self.pie_target_canvas.yview)
+        pie_target_scroll.grid(row=2, column=1, sticky="ns")
+        self.pie_target_canvas.configure(yscrollcommand=pie_target_scroll.set)
+        self.pie_target_inner = ttk.Frame(self.pie_target_canvas, padding=6)
+        self.pie_target_window = self.pie_target_canvas.create_window((0, 0), window=self.pie_target_inner, anchor="nw")
+        self.pie_target_canvas.bind("<Configure>", self._resize_pie_target_canvas)
+        self.pie_target_inner.bind(
+            "<Configure>",
+            lambda _event: self.pie_target_canvas.configure(scrollregion=self.pie_target_canvas.bbox("all")),
+        )
+        self.pie_result_tree = ttk.Treeview(
+            pie_frame,
+            columns=("current", "target", "suggested", "final", "final_percent", "note"),
+            show="tree headings",
+        )
+        self.pie_result_tree.heading("#0", text="资产")
+        for key, label, width in (
+            ("current", "当前CNY", 86),
+            ("target", "目标%", 68),
+            ("suggested", "建议注资", 86),
+            ("final", "注资后CNY", 96),
+            ("final_percent", "注资后%", 78),
+            ("note", "说明", 110),
+        ):
+            self.pie_result_tree.heading(key, text=label)
+            self.pie_result_tree.column(key, width=width, anchor="w")
+        self.pie_result_tree.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
+
         deprecated_header = ttk.Frame(deprecated_frame)
         deprecated_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         deprecated_header.columnconfigure(0, weight=1)
@@ -651,6 +725,7 @@ class MoneyApp(tk.Tk):
         self._refresh_summary()
         self._refresh_filter_tags()
         self._refresh_assets()
+        self._refresh_pie_targets()
         self._refresh_deprecated_assets()
         self._refresh_tags()
         self._refresh_history()
@@ -667,6 +742,7 @@ class MoneyApp(tk.Tk):
 
     def _refresh_filter_tags(self, reset: bool = False) -> None:
         current_tag_id = None if reset else self.filter_tag_options.get(self.filter_tag_var.get())
+        self.selected_filter_tag_ids = [tag_id for tag_id in self.selected_filter_tag_ids if tag_id in self.store.tags]
         category = CATEGORY_OPTIONS.get(self.filter_category_var.get())
         if category:
             tags = self.store.tags_by_category(category)
@@ -692,15 +768,23 @@ class MoneyApp(tk.Tk):
                 self.filter_tag_var.set(ALL_FILTER_TAGS)
         elif self.filter_tag_var.get() not in self.filter_tag_options:
             self.filter_tag_var.set(ALL_FILTER_TAGS)
+        self._refresh_filter_tag_list()
+
+    def _filter_tag_label(self, tag: Tag) -> str:
+        return f"{category_label(tag.category)}：{self.store.tag_display_name(tag)}"
+
+    def _refresh_filter_tag_list(self) -> None:
+        self.filter_tag_list.delete(0, tk.END)
+        for tag_id in self.selected_filter_tag_ids:
+            tag = self.store.tags.get(tag_id)
+            if tag:
+                self.filter_tag_list.insert(tk.END, self._filter_tag_label(tag))
 
     def _selected_filter_tag(self) -> Tag | None:
         tag_id = self.filter_tag_options.get(self.filter_tag_var.get())
         return self.store.tags.get(tag_id) if tag_id else None
 
-    def _asset_matches_filter_tag(self, asset: Asset) -> bool:
-        tag = self._selected_filter_tag()
-        if tag is None:
-            return True
+    def _asset_matches_tag(self, asset: Asset, tag: Tag) -> bool:
         if tag.id in asset.tag_ids:
             return True
         return any(
@@ -708,11 +792,43 @@ class MoneyApp(tk.Tk):
             for asset_tag in self.store.asset_tags(asset)
         )
 
+    def _asset_matches_filter_tags(self, asset: Asset) -> bool:
+        tags = [self.store.tags[tag_id] for tag_id in self.selected_filter_tag_ids if tag_id in self.store.tags]
+        if not tags:
+            return True
+        matches = [self._asset_matches_tag(asset, tag) for tag in tags]
+        logic = self.filter_logic_var.get()
+        if logic == "或":
+            return any(matches)
+        if logic == "非与":
+            return not all(matches)
+        if logic == "非或":
+            return not any(matches)
+        return all(matches)
+
     def _filtered_assets(self) -> list[Asset]:
-        return [asset for asset in self.store.active_assets() if self._asset_matches_filter_tag(asset)]
+        return [asset for asset in self.store.active_assets() if self._asset_matches_filter_tags(asset)]
 
     def _on_filter_category_changed(self, _event: tk.Event[tk.Widget] | None = None) -> None:
         self._refresh_filter_tags(reset=True)
+
+    def add_filter_tag(self) -> None:
+        tag = self._selected_filter_tag()
+        if tag is None:
+            return
+        if tag.id not in self.selected_filter_tag_ids:
+            self.selected_filter_tag_ids.append(tag.id)
+        self._refresh_filter_tag_list()
+        self._apply_asset_filter()
+
+    def remove_selected_filter_tag(self) -> None:
+        selected_indexes = list(self.filter_tag_list.curselection())
+        if not selected_indexes:
+            return
+        for index in sorted(selected_indexes, reverse=True):
+            if 0 <= index < len(self.selected_filter_tag_ids):
+                del self.selected_filter_tag_ids[index]
+        self._refresh_filter_tag_list()
         self._apply_asset_filter()
 
     def _apply_asset_filter(self, _event: tk.Event[tk.Widget] | None = None) -> None:
@@ -720,11 +836,14 @@ class MoneyApp(tk.Tk):
         if self.selected_asset_id not in visible_ids:
             self.selected_asset_id = None
         self._refresh_assets()
+        self._refresh_pie_targets()
         self._refresh_history()
 
     def clear_asset_filter(self) -> None:
         self.filter_category_var.set(ALL_FILTER_CATEGORIES)
         self.filter_tag_var.set(ALL_FILTER_TAGS)
+        self.filter_logic_var.set("与")
+        self.selected_filter_tag_ids.clear()
         self._refresh_filter_tags(reset=True)
         self._apply_asset_filter()
 
@@ -775,6 +894,220 @@ class MoneyApp(tk.Tk):
             self.sort_column = column
             self.sort_reverse = column in {"value", "equivalent", "share", "updated_at"}
         self._refresh_assets()
+
+    def _resize_pie_target_canvas(self, event: tk.Event[tk.Widget]) -> None:
+        self.pie_target_canvas.itemconfigure(self.pie_target_window, width=event.width)
+
+    def _asset_cny_value_or_none(self, asset: Asset) -> Decimal | None:
+        try:
+            return self.store.asset_equivalent_value(asset, "CNY")
+        except ValueError:
+            return None
+
+    def _format_cny(self, value: Decimal) -> str:
+        return f"¥{value.quantize(Decimal('0.01'))}"
+
+    def _refresh_pie_targets(self) -> None:
+        for child in self.pie_target_inner.winfo_children():
+            child.destroy()
+        self.pie_result_tree.delete(*self.pie_result_tree.get_children())
+
+        assets = self._filtered_assets()
+        current_values = {asset.id: self._asset_cny_value_or_none(asset) for asset in assets}
+        available_ids = {asset.id for asset in assets}
+        self.pie_target_vars = {
+            asset_id: variable
+            for asset_id, variable in self.pie_target_vars.items()
+            if asset_id in available_ids
+        }
+
+        ttk.Label(self.pie_target_inner, text="资产").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(self.pie_target_inner, text="当前CNY").grid(row=0, column=1, sticky="w", padx=(0, 8))
+        ttk.Label(self.pie_target_inner, text="当前%").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        ttk.Label(self.pie_target_inner, text="目标%").grid(row=0, column=3, sticky="w")
+
+        if not assets:
+            ttk.Label(self.pie_target_inner, text="当前筛选结果没有资产。", foreground="#64748b").grid(
+                row=1, column=0, columnspan=4, sticky="w", pady=(8, 0)
+            )
+            self.pie_status_var.set("当前筛选结果没有资产。")
+            return
+
+        known_values = [value for value in current_values.values() if value is not None]
+        total = sum(known_values, Decimal("0")) if len(known_values) == len(assets) else None
+        for row, asset in enumerate(assets, start=1):
+            value = current_values[asset.id]
+            current_text = "未更新" if value is None else self._format_cny(value)
+            if value is None or total is None or total == 0:
+                percent_text = "-"
+            else:
+                percent_text = f"{(value / total * Decimal('100')).quantize(Decimal('0.01'))}%"
+            if asset.id not in self.pie_target_vars:
+                default_percent = "" if value is None or total is None or total == 0 else str((value / total * Decimal("100")).quantize(Decimal("0.01")))
+                self.pie_target_vars[asset.id] = tk.StringVar(value=default_percent)
+            ttk.Label(self.pie_target_inner, text=asset.name).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+            ttk.Label(self.pie_target_inner, text=current_text).grid(row=row, column=1, sticky="w", padx=(0, 8), pady=2)
+            ttk.Label(self.pie_target_inner, text=percent_text).grid(row=row, column=2, sticky="w", padx=(0, 8), pady=2)
+            ttk.Entry(self.pie_target_inner, textvariable=self.pie_target_vars[asset.id], width=10).grid(
+                row=row, column=3, sticky="w", pady=2
+            )
+        self.pie_status_var.set("按当前筛选结果设置目标配比，金额以人民币等价值计算。")
+
+    def fill_pie_targets_current(self) -> None:
+        assets = self._filtered_assets()
+        values = {asset.id: self._asset_cny_value_or_none(asset) for asset in assets}
+        if any(value is None for value in values.values()):
+            messagebox.showerror("无法载入当前配比", "请先点击“更新等价值”。", parent=self)
+            return
+        total = sum((value for value in values.values() if value is not None), Decimal("0"))
+        if total <= 0:
+            return
+        for asset in assets:
+            value = values[asset.id] or Decimal("0")
+            self.pie_target_vars.setdefault(asset.id, tk.StringVar()).set(str((value / total * Decimal("100")).quantize(Decimal("0.01"))))
+
+    def fill_pie_targets_equal(self) -> None:
+        assets = self._filtered_assets()
+        if not assets:
+            return
+        equal = Decimal("100") / Decimal(len(assets))
+        for index, asset in enumerate(assets):
+            percent = equal
+            if index == len(assets) - 1:
+                assigned = equal.quantize(Decimal("0.01")) * Decimal(len(assets) - 1)
+                percent = Decimal("100") - assigned
+            self.pie_target_vars.setdefault(asset.id, tk.StringVar()).set(str(percent.quantize(Decimal("0.01"))))
+
+    def _parse_pie_inputs(self) -> tuple[list[Asset], dict[str, Decimal], dict[str, Decimal], Decimal] | None:
+        assets = self._filtered_assets()
+        if not assets:
+            messagebox.showinfo("无法计算", "当前筛选结果没有资产。", parent=self)
+            return None
+        try:
+            injection = Decimal(self.pie_injection_var.get().strip())
+        except Exception:
+            messagebox.showerror("金额无效", "请输入有效的新注资金额。", parent=self)
+            return None
+
+        current_values: dict[str, Decimal] = {}
+        targets: dict[str, Decimal] = {}
+        for asset in assets:
+            value = self._asset_cny_value_or_none(asset)
+            if value is None:
+                messagebox.showerror("无法计算", "请先点击“更新等价值”，确保筛选出的资产都有人民币等价值。", parent=self)
+                return None
+            current_values[asset.id] = value
+            try:
+                target = Decimal(self.pie_target_vars[asset.id].get().strip())
+            except Exception:
+                messagebox.showerror("目标比例无效", f"请检查「{asset.name}」的目标比例。", parent=self)
+                return None
+            targets[asset.id] = target
+
+        target_sum = sum(targets.values(), Decimal("0"))
+        if target_sum <= 0:
+            messagebox.showerror("目标比例无效", "目标比例合计必须大于 0。", parent=self)
+            return None
+        warnings = []
+        if injection <= 0:
+            warnings.append(
+                "新注资金额为 0 或负数，本次将按重配置/卖出计算；结果中的负数表示需要卖出或转出。"
+            )
+        if any(target < 0 for target in targets.values()):
+            warnings.append(
+                "目标百分比包含负数，本次将按做空目标计算；结果可能出现负目标占比或卖出/转出建议。"
+            )
+        if abs(target_sum - Decimal("100")) > Decimal("0.01"):
+            warnings.append(
+                f"目标比例合计为 {target_sum.quantize(Decimal('0.01'))}%，将自动归一化后计算。"
+            )
+        if warnings and not messagebox.askyesno("确认补pie计算", "\n\n".join(warnings) + "\n\n确认继续计算吗？", parent=self):
+            return None
+        return assets, current_values, targets, injection
+
+    def calculate_pie_top_up(self) -> None:
+        parsed = self._parse_pie_inputs()
+        if parsed is None:
+            return
+        assets, current_values, targets, injection = parsed
+        self.pie_result_tree.delete(*self.pie_result_tree.get_children())
+
+        current_total = sum(current_values.values(), Decimal("0"))
+        final_total = current_total + injection
+        target_sum = sum(targets.values(), Decimal("0"))
+        no_sell_mode = self.pie_no_sell_var.get()
+        if no_sell_mode and injection < 0:
+            messagebox.showerror("无法计算", "“非卖出再分配”模式下，新注资金额不能为负数。", parent=self)
+            return
+        if final_total < 0:
+            messagebox.showerror(
+                "无法计算",
+                f"卖出金额不能超过当前筛选资产总额。当前总额为 {self._format_cny(current_total)}。",
+                parent=self,
+            )
+            return
+
+        suggestions: dict[str, Decimal] = {}
+        target_ratios = {asset.id: targets[asset.id] / target_sum for asset in assets}
+        if no_sell_mode:
+            desired_values = {asset.id: final_total * target_ratios[asset.id] for asset in assets}
+            positive_gaps = {
+                asset.id: desired_values[asset.id] - current_values[asset.id]
+                for asset in assets
+                if desired_values[asset.id] > current_values[asset.id]
+            }
+            positive_gap_total = sum(positive_gaps.values(), Decimal("0"))
+            if injection == 0:
+                suggestions = {asset.id: Decimal("0") for asset in assets}
+            elif positive_gap_total > 0:
+                suggestions = {
+                    asset.id: injection * positive_gaps.get(asset.id, Decimal("0")) / positive_gap_total
+                    for asset in assets
+                }
+            else:
+                best_asset = max(assets, key=lambda asset: target_ratios[asset.id])
+                suggestions = {asset.id: Decimal("0") for asset in assets}
+                suggestions[best_asset.id] = injection
+        else:
+            for asset in assets:
+                desired_value = final_total * target_ratios[asset.id]
+                suggestions[asset.id] = desired_value - current_values[asset.id]
+
+        for asset in assets:
+            suggested = suggestions[asset.id]
+            final_value = current_values[asset.id] + suggested
+            final_percent = (final_value / final_total * Decimal("100")) if final_total > 0 else Decimal("0")
+            normalized_target = target_ratios[asset.id] * Decimal("100")
+            if suggested > 0:
+                note = "买入/注入"
+            elif suggested < 0:
+                note = "卖出/转出"
+            elif no_sell_mode and injection > 0:
+                note = "不买入"
+            else:
+                note = "不调整"
+            self.pie_result_tree.insert(
+                "",
+                "end",
+                text=asset.name,
+                values=(
+                    self._format_cny(current_values[asset.id]),
+                    f"{normalized_target.quantize(Decimal('0.01'))}%",
+                    self._format_cny(suggested),
+                    self._format_cny(final_value),
+                    f"{final_percent.quantize(Decimal('0.01'))}%",
+                    note,
+                ),
+            )
+
+        if no_sell_mode:
+            self.pie_status_var.set("计算完成：非卖出再分配模式下，所有建议注资均不为负，结果为尽量靠近目标的近似方案。")
+        elif injection > 0:
+            self.pie_status_var.set("计算完成：正数表示买入/注入，负数表示为达成目标需要卖出/转出。")
+        elif injection == 0:
+            self.pie_status_var.set("计算完成：这是 0 新资金重配置方案，正数买入，负数卖出/转出。")
+        else:
+            self.pie_status_var.set("计算完成：这是卖出后重配置方案，负数表示卖出/转出，正数表示回补到目标资产。")
 
     def _refresh_tags(self) -> None:
         self.tag_tree.delete(*self.tag_tree.get_children())
