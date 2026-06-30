@@ -39,6 +39,7 @@ class MoneyStore:
     assets: dict[str, Asset] = field(default_factory=dict)
     tags: dict[str, Tag] = field(default_factory=dict)
     changes: list[AssetChange] = field(default_factory=list)
+    ui_state: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def default(cls) -> "MoneyStore":
@@ -60,6 +61,7 @@ class MoneyStore:
             assets={item["id"]: Asset.from_dict(item) for item in data.get("assets", [])},
             tags={item["id"]: Tag.from_dict(item) for item in data.get("tags", [])},
             changes=[AssetChange.from_dict(item) for item in data.get("changes", [])],
+            ui_state=dict(data.get("ui_state", {})),
         )
         store.ensure_currency_tags()
         return store
@@ -76,6 +78,7 @@ class MoneyStore:
             "assets": [asset.to_dict() for asset in self.assets.values()],
             "tags": [tag.to_dict() for tag in self.tags.values()],
             "changes": [change.to_dict() for change in self.changes],
+            "ui_state": self.ui_state,
         }
 
     def add_tag(self, name: str, category: str, parent_id: str | None = None) -> Tag:

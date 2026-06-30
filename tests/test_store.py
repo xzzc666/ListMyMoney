@@ -234,6 +234,27 @@ class MoneyStoreTest(unittest.TestCase):
             self.assertEqual(len(imported.assets), 1)
             self.assertEqual(len(imported.changes), 1)
 
+    def test_ui_state_round_trips_with_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            data_path = tmp_path / "mymoney_data.json"
+            package_path = tmp_path / "backup.zip"
+            imported_path = tmp_path / "imported.json"
+
+            store = MoneyStore.default()
+            store.ui_state["tools"] = {
+                "pie": {"asset_ids": ["asset_1"], "targets": {"asset_1": "60"}},
+                "group_pie": {"asset_ids": ["asset_2"], "targets": {"Gold": "40"}},
+            }
+            store.save(data_path)
+
+            export_package(data_path, package_path)
+            import_package(package_path, imported_path)
+
+            imported = MoneyStore.load(imported_path)
+            self.assertEqual(imported.ui_state["tools"]["pie"]["asset_ids"], ["asset_1"])
+            self.assertEqual(imported.ui_state["tools"]["group_pie"]["targets"]["Gold"], "40")
+
 
 if __name__ == "__main__":
     unittest.main()
